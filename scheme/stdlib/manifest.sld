@@ -2729,6 +2729,7 @@ f3")))
           make-hash-table-storage
           hash-table-storage?
           hash-table-storage-policy
+          hash-table-storage-layout
           hash-table-storage-mutable?
           hash-table-storage-size
           hash-table-storage-capacity
@@ -2742,6 +2743,13 @@ f3")))
           hash-table-storage-reserve!
           hash-table-storage-copy
           hash-table-storage-entries
+          hash-table-storage-loop
+          hash-table-storage-buckets
+          unordered-entry-key
+          unordered-entry-value
+          unordered-entry-bucket-next
+          ordered-entry-key
+          ordered-entry-value
           hash-table-storage-first-entry
           hash-table-storage-last-entry
           hash-table-entry?
@@ -2762,7 +2770,10 @@ f3")))
           (storage-model
            (buckets intrusive-separate-chaining)
            (maximum-load 3/4)
-           (order stable-insertion-chain)
+           (layouts unordered insertion-ordered)
+           (entry-fields (unordered 5) (insertion-ordered 7))
+           (default-layout unordered)
+           (order optional-stable-insertion-chain)
            (revisions structural-and-value-sensitive))))
         (verification
          ((test-status

@@ -5027,6 +5027,19 @@
             (hash-table-ref table 'beta))")
     "(#t 2 1 absent 12)")))
 
+(ert-deftest consent-library-test-srfi-125-storage-layouts ()
+  "Load both storage variants and their traversal syntax in the evaluator."
+  (should
+   (equal
+    (consent-library-test--external/options
+     (with-temp-buffer
+       (insert-file-contents
+        (expand-file-name "tests/fixtures/hash-table-layouts.scm"
+                          consent-library-test--root))
+       (buffer-string))
+     '(:internal-libraries-allowed t))
+    "((unordered 2 160 #t) (insertion-ordered 2 160 #t))")))
+
 (ert-deftest consent-library-test-srfi-125-alias-import ()
   "Import hash tables through the secondary `(srfi 125)' alias."
   (should

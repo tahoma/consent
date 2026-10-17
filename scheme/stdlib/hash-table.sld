@@ -74,6 +74,11 @@
            (symbol-hash comparator-symbol-hash))
           (stdlib hash-table implementation))
   (begin
+    ;; Generic entry access outside the layout-specialized traversal loops.
+    (define entry-key hash-table-entry-key)
+    ;; Traversal syntax binds this name to the concrete layout's accessor.
+    (define entry-value hash-table-entry-value)
+
     ;; Optional facilities that this portable provider cannot implement.
     (define unsupported-options
       '(thread-safe weak-keys ephemeral-keys weak-values ephemeral-values))
@@ -279,16 +284,17 @@
 
     (define (table-entries-match? source target value=?)
       "Return whether every SOURCE association occurs in TARGET."
-      (let loop ((entry (hash-table-storage-first-entry source)))
+      (hash-table-storage-loop source
+          (entry next position advance entry-key entry-value) ()
         (if (not entry)
             #t
             (let ((other
                     (table-ref-entry-if-accepted
-                     target (hash-table-entry-key entry))))
+                     target (entry-key entry))))
               (and other
-                   (value=? (hash-table-entry-value entry)
+                   (value=? (entry-value entry)
                             (hash-table-entry-value other))
-                   (loop (hash-table-entry-next entry)))))))
+                   (advance next position))))))
 
     (define (hash-table=? value-comparator left right)
       "Return whether compatible tables LEFT and RIGHT have equal values."
@@ -334,7 +340,7 @@
              (hash-table-storage-ref-entry
               (check-table table 'hash-table-ref) key)))
         (if entry
-            (let ((value (hash-table-entry-value entry)))
+            (let ((value (entry-value entry)))
               (if (and (pair? handlers) (pair? (cdr handlers)))
                   ((cadr handlers) value)
                   value))
@@ -353,7 +359,7 @@
       (let ((entry
              (hash-table-storage-ref-entry
               (check-table table 'hash-table-ref/default) key)))
-        (if entry (hash-table-entry-value entry) default)))
+        (if entry (entry-value entry) default)))
 
     (define (hash-table-set! table . associations)
       "Set alternating ASSOCIATIONS in mutable TABLE."
@@ -401,7 +407,7 @@
       (check-mutable-table table 'hash-table-intern!)
       (let ((entry (hash-table-storage-ref-entry table key)))
         (if entry
-            (hash-table-entry-value entry)
+            (entry-value entry)
             (let ((value (failure)))
               (hash-table-storage-set! table key value)
               value))))
@@ -439,11 +445,14 @@
         (returns (type values) (description "Removed key and value."))
         (effects mutation allocation error procedure-call))
       (check-mutable-table table 'hash-table-pop!)
-      (let ((entry (hash-table-storage-last-entry table)))
+      (hash-table-storage-loop table
+          (entry next position advance entry-key entry-value) ()
+        ;; Pop terminates this traversal rather than advancing its successor.
+        next
         (if (not entry)
             (error "cannot pop an empty hash table" table))
-        (let ((key (hash-table-entry-key entry))
-              (value (hash-table-entry-value entry)))
+        (let ((key (entry-key entry))
+              (value (entry-value entry)))
           (hash-table-storage-delete! table key)
           (values key value))))
 
@@ -464,25 +473,23 @@
         (effects error))
       (hash-table-storage-size (check-table table 'hash-table-size)))
 
-    (define (entry-chain-map table procedure)
-      "Map PROCEDURE over TABLE's entry chain without a snapshot."
-      (let loop ((entry (hash-table-storage-first-entry table))
-                 (head '())
-                 (tail #f))
+    (define (entry-map table procedure)
+      "Map PROCEDURE over TABLE's entries without a snapshot."
+      (hash-table-storage-loop table
+          (entry next position advance entry-key entry-value)
+          ((head '()) (tail #f))
         (if (not entry)
             head
             (let ((cell (list (procedure entry))))
               (if tail (set-cdr! tail cell))
-              (loop (hash-table-entry-next entry)
-                    (if tail head cell)
-                    cell)))))
+              (advance next position (if tail head cell) cell)))))
 
     (define (hash-table-keys table)
       "Return a fresh list of TABLE's keys in unspecified order."
       #((parameters (table (type hash-table) (description "Hash table.")))
         (returns (type list) (description "Fresh key list."))
         (effects allocation error))
-      (entry-chain-map
+      (entry-map
        (check-table table 'hash-table-keys) hash-table-entry-key))
 
     (define (hash-table-values table)
@@ -490,7 +497,7 @@
       #((parameters (table (type hash-table) (description "Hash table.")))
         (returns (type list) (description "Fresh value list."))
         (effects allocation error))
-      (entry-chain-map
+      (entry-map
        (check-table table 'hash-table-values) hash-table-entry-value))
 
     (define (hash-table-entries table)
@@ -499,22 +506,21 @@
         (returns (type values) (description "Key list and value list."))
         (effects allocation error))
       (check-table table 'hash-table-entries)
-      (let loop ((entry (hash-table-storage-first-entry table))
-                 (key-head '())
-                 (key-tail #f)
-                 (value-head '())
-                 (value-tail #f))
+      (hash-table-storage-loop table
+          (entry next position advance entry-key entry-value)
+          ((key-head '()) (key-tail #f)
+           (value-head '()) (value-tail #f))
         (if (not entry)
             (values key-head value-head)
-            (let ((key-cell (list (hash-table-entry-key entry)))
-                  (value-cell (list (hash-table-entry-value entry))))
+            (let ((key-cell (list (entry-key entry)))
+                  (value-cell (list (entry-value entry))))
               (if key-tail (set-cdr! key-tail key-cell))
               (if value-tail (set-cdr! value-tail value-cell))
-              (loop (hash-table-entry-next entry)
-                    (if key-tail key-head key-cell)
-                    key-cell
-                    (if value-tail value-head value-cell)
-                    value-cell)))))
+              (advance next position
+                       (if key-tail key-head key-cell)
+                       key-cell
+                       (if value-tail value-head value-cell)
+                       value-cell)))))
 
     (define (check-callback-mutation table version operation)
       "Reject a callback that changed TABLE from VERSION."
@@ -554,19 +560,20 @@
         (returns (type any) (description "Predicate or failure result."))
         (effects allocation error procedure-call))
       (check-table table 'hash-table-find)
-      (let loop ((entry (hash-table-storage-first-entry table)))
+      (hash-table-storage-loop table
+          (entry next position advance entry-key entry-value) ()
         (if (not entry)
             (failure)
             (let ((result
                     (call-without-table-mutation-2
                      table
                      procedure
-                     (hash-table-entry-key entry)
-                     (hash-table-entry-value entry)
+                     (entry-key entry)
+                     (entry-value entry)
                      'hash-table-find)))
               (if result
                   result
-                  (loop (hash-table-entry-next entry)))))))
+                  (advance next position))))))
 
     (define (hash-table-count predicate table)
       "Return the number of TABLE associations satisfying PREDICATE."
@@ -577,16 +584,16 @@
          (description "Number of true predicate results."))
         (effects allocation error procedure-call))
       (check-table table 'hash-table-count)
-      (let loop ((entry (hash-table-storage-first-entry table)) (count 0))
+      (hash-table-storage-loop table
+          (entry next position advance entry-key entry-value) ((count 0))
         (if (not entry)
             count
-            (loop
-             (hash-table-entry-next entry)
+            (advance next position
              (if (call-without-table-mutation-2
                   table
                   predicate
-                  (hash-table-entry-key entry)
-                  (hash-table-entry-value entry)
+                  (entry-key entry)
+                  (entry-value entry)
                   'hash-table-count)
                  (+ count 1)
                  count)))))
@@ -601,17 +608,18 @@
         (effects allocation mutation error procedure-call))
       (check-table table 'hash-table-map)
       (let ((result (make-hash-table comparator)))
-        (let loop ((entry (hash-table-storage-first-entry table)))
+        (hash-table-storage-loop table
+          (entry next position advance entry-key entry-value) ()
           (if (not entry)
               result
               (begin
                 (hash-table-storage-set!
                  result
-                 (hash-table-entry-key entry)
+                 (entry-key entry)
                  (call-without-table-mutation-1
-                  table procedure (hash-table-entry-value entry)
+                  table procedure (entry-value entry)
                   'hash-table-map))
-                (loop (hash-table-entry-next entry)))))))
+                (advance next position))))))
 
     (define (hash-table-for-each procedure table)
       "Call PROCEDURE for every association in TABLE."
@@ -621,16 +629,17 @@
         (returns (type unspecified) (description "Unspecified value."))
         (effects allocation error procedure-call))
       (check-table table 'hash-table-for-each)
-      (let loop ((entry (hash-table-storage-first-entry table)))
+      (hash-table-storage-loop table
+          (entry next position advance entry-key entry-value) ()
         (if entry
             (begin
               (call-without-table-mutation-2
                table
                procedure
-               (hash-table-entry-key entry)
-               (hash-table-entry-value entry)
+               (entry-key entry)
+               (entry-value entry)
                'hash-table-for-each)
-              (loop (hash-table-entry-next entry))))))
+              (advance next position)))))
 
     (define (hash-table-walk table procedure)
       "Call PROCEDURE for TABLE's associations; deprecated SRFI 69 order."
@@ -649,18 +658,18 @@
         (returns (type unspecified) (description "Unspecified value."))
         (effects mutation allocation error procedure-call))
       (check-mutable-table table 'hash-table-map!)
-      (let loop ((entry (hash-table-storage-first-entry table)))
+      (hash-table-storage-loop table
+          (entry next position advance entry-key entry-value) ()
         (if entry
-            (let ((next (hash-table-entry-next entry))
-                  (value
+            (let ((value
                    (call-without-table-mutation-2
                      table
                      procedure
-                     (hash-table-entry-key entry)
-                     (hash-table-entry-value entry)
+                     (entry-key entry)
+                     (entry-value entry)
                      'hash-table-map!)))
               (hash-table-entry-set-value! entry value)
-              (loop next)))))
+              (advance next position)))))
 
     (define (hash-table-map->list procedure table)
       "Return a list of PROCEDURE results for TABLE's associations."
@@ -670,9 +679,9 @@
         (returns (type list) (description "Fresh result list."))
         (effects allocation error procedure-call))
       (check-table table 'hash-table-map->list)
-      (let loop ((entry (hash-table-storage-first-entry table))
-                 (head '())
-                 (tail #f))
+      (hash-table-storage-loop table
+          (entry next position advance entry-key entry-value)
+          ((head '()) (tail #f))
         (if (not entry)
             head
             (let ((cell
@@ -680,13 +689,11 @@
                     (call-without-table-mutation-2
                      table
                      procedure
-                     (hash-table-entry-key entry)
-                     (hash-table-entry-value entry)
+                     (entry-key entry)
+                     (entry-value entry)
                      'hash-table-map->list))))
               (if tail (set-cdr! tail cell))
-              (loop (hash-table-entry-next entry)
-                    (if tail head cell)
-                    cell)))))
+              (advance next position (if tail head cell) cell)))))
 
     (define (hash-table-fold procedure-or-table seed-or-procedure table-or-seed)
       "Fold a hash table, accepting current or deprecated argument order."
@@ -712,17 +719,17 @@
                  procedure-or-table
                  table-or-seed)))
         (check-table table 'hash-table-fold)
-        (let loop ((entry (hash-table-storage-first-entry table))
-                   (value seed))
+        (hash-table-storage-loop table
+          (entry next position advance entry-key entry-value)
+          ((value seed))
           (if (not entry)
               value
-              (loop
-               (hash-table-entry-next entry)
+              (advance next position
                (call-without-table-mutation-3
                 table
                 procedure
-                (hash-table-entry-key entry)
-                (hash-table-entry-value entry)
+                (entry-key entry)
+                (entry-value entry)
                 value
                 'hash-table-fold))))))
 
@@ -734,17 +741,18 @@
         (returns (type unspecified) (description "Unspecified value."))
         (effects mutation allocation error procedure-call))
       (check-mutable-table table 'hash-table-prune!)
-      (let loop ((entry (hash-table-storage-first-entry table)))
+      (hash-table-storage-loop table
+          (entry next position advance entry-key entry-value) ()
         (if entry
-            (let ((next (hash-table-entry-next entry)))
+            (begin
               (if (call-without-table-mutation-2
                    table predicate
-                   (hash-table-entry-key entry)
-                   (hash-table-entry-value entry)
+                   (entry-key entry)
+                   (entry-value entry)
                    'hash-table-prune!)
                   (hash-table-storage-delete!
-                   table (hash-table-entry-key entry)))
-              (loop next)))))
+                   table (entry-key entry)))
+              (advance next position)))))
 
     (define (hash-table-copy table . mutable)
       "Return a copy of TABLE, immutable unless MUTABLE is true."
@@ -768,18 +776,19 @@
       (make-hash-table-storage
        (hash-table-storage-policy table)
        (hash-table-storage-capacity table)
-       #t))
+       #t
+       (hash-table-storage-layout table)))
 
     (define (hash-table->alist table)
       "Return a fresh association list containing TABLE's entries."
       #((parameters (table (type hash-table) (description "Hash table.")))
         (returns (type list) (description "Fresh association list."))
         (effects allocation error))
-      (entry-chain-map
+      (entry-map
        (check-table table 'hash-table->alist)
        (lambda (entry)
-         (cons (hash-table-entry-key entry)
-               (hash-table-entry-value entry)))))
+         (cons (entry-key entry)
+               (entry-value entry)))))
 
     (define (hash-table-union! left right)
       "Add RIGHT's absent associations to mutable LEFT and return LEFT."
@@ -790,16 +799,17 @@
         (effects mutation allocation error procedure-call))
       (check-mutable-table left 'hash-table-union!)
       (check-table right 'hash-table-union!)
-      (let loop ((entry (hash-table-storage-first-entry right)))
+      (hash-table-storage-loop right
+          (entry next position advance entry-key entry-value) ()
         (if entry
             (begin
               (if (not (table-ref-entry-if-accepted
-                        left (hash-table-entry-key entry)))
+                        left (entry-key entry)))
                   (hash-table-storage-set!
                    left
-                   (hash-table-entry-key entry)
-                   (hash-table-entry-value entry)))
-              (loop (hash-table-entry-next entry)))))
+                   (entry-key entry)
+                   (entry-value entry)))
+              (advance next position))))
       left)
 
     (define (hash-table-merge! left right)
@@ -820,14 +830,15 @@
         (effects mutation allocation error procedure-call))
       (check-mutable-table left 'hash-table-intersection!)
       (check-table right 'hash-table-intersection!)
-      (let loop ((entry (hash-table-storage-first-entry left)))
+      (hash-table-storage-loop left
+          (entry next position advance entry-key entry-value) ()
         (if entry
-            (let ((next (hash-table-entry-next entry)))
+            (begin
               (if (not (table-ref-entry-if-accepted
-                        right (hash-table-entry-key entry)))
+                        right (entry-key entry)))
                   (hash-table-storage-delete!
-                   left (hash-table-entry-key entry)))
-              (loop next))))
+                   left (entry-key entry)))
+              (advance next position))))
       left)
 
     (define (hash-table-difference! left right)
@@ -839,14 +850,15 @@
         (effects mutation allocation error procedure-call))
       (check-mutable-table left 'hash-table-difference!)
       (check-table right 'hash-table-difference!)
-      (let loop ((entry (hash-table-storage-first-entry left)))
+      (hash-table-storage-loop left
+          (entry next position advance entry-key entry-value) ()
         (if entry
-            (let ((next (hash-table-entry-next entry)))
+            (begin
               (if (table-ref-entry-if-accepted
-                   right (hash-table-entry-key entry))
+                   right (entry-key entry))
                   (hash-table-storage-delete!
-                   left (hash-table-entry-key entry)))
-              (loop next))))
+                   left (entry-key entry)))
+              (advance next position))))
       left)
 
     (define (hash-table-xor! left right)
@@ -858,15 +870,15 @@
         (effects mutation allocation error procedure-call))
       (check-mutable-table left 'hash-table-xor!)
       (check-table right 'hash-table-xor!)
-      (let loop ((entry (hash-table-storage-first-entry right)))
+      (hash-table-storage-loop right
+          (entry next position advance entry-key entry-value) ()
         (if entry
-            (let ((next (hash-table-entry-next entry))
-                  (key (hash-table-entry-key entry)))
+            (let ((key (entry-key entry)))
               (if (table-ref-entry-if-accepted left key)
                   (hash-table-storage-delete! left key)
                   (hash-table-storage-set!
-                   left key (hash-table-entry-value entry)))
-              (loop next))))
+                   left key (entry-value entry)))
+              (advance next position))))
       left)
 
     (define (hash object . ignored)

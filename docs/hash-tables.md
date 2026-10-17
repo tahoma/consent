@@ -15,14 +15,33 @@ set.
 | `(stdlib hash-table r6rs)` | Planned SRFI 126 facade for `(srfi 126)` and `(srfi srfi-126)`, with R6RS-style constructors, vectors, capacity, and introspection. |
 | `(stdlib hash-table insertion-ordered)` | Planned SRFI 250 facade for `(srfi 250)` and `(srfi srfi-250)`, with cursors and order-sensitive traversal. |
 
-The internal engine uses intrusive separate chaining for lookup and a doubly
-linked entry chain for stable insertion order. Each entry carries its bucket
-link directly, so insertion and growth do not allocate a separate bucket-list
-pair. SRFI 125 deliberately continues to describe whole-table order as
-unspecified. Keeping the order links now avoids a representation migration when
-the SRFI 250 facade adds first, last, next, previous, and cursor operations.
-Updating an existing association preserves its position; deleting and
-reinserting it appends a new entry.
+The internal engine uses intrusive separate chaining and a per-table layout
+tag. Default SRFI 125 tables use compact unordered entries. The ordered layout
+adds a doubly linked insertion chain for the future SRFI 250 facade. Each entry
+carries its bucket link directly, so neither layout allocates bucket-list
+pairs or per-entry sidecars.
+
+| Layout | Entry payload fields | Whole-table traversal |
+| --- | ---: | --- |
+| `unordered` | 5: owner, key, value, hash, bucket-next | Bucket scan |
+| `insertion-ordered` | 7: the common fields plus previous and next | Insertion chain |
+
+The private constructor accepts an optional layout tag; the tag cannot change
+after construction. Copies and empty copies retain it. Set operations accept
+either source layout and preserve the destination layout. The SRFI 125 facade
+accepts either layout while continuing to promise unspecified traversal order.
+The future SRFI 250 facade will construct and require ordered storage. Its
+first, last, next, previous, and cursor operations must not accept unordered
+entries. Updating an ordered association preserves its position; deleting and
+reinserting it appends a new entry. Public names and aliases do not change.
+
+Lookup, bucket deletion, and rehashing select concrete entry accessors once per
+operation. The internal traversal syntax selects bucket scanning or insertion
+links once, carries iterator state in tail-call arguments, and saves the next
+entry before the body runs. This permits pruning the current entry without
+allocating a snapshot, iterator record, or per-entry closure. The traversal's
+accessor support exports belong only to the internal library, not any public
+hash-table facade.
 
 The source-owning `(stdlib hash-table ...)` hierarchy makes the shared family
 visible without merging incompatible standards. No umbrella library exports a
@@ -96,8 +115,14 @@ The independent suite also covers adversarial collisions and growth, fresh
 entry result lists, comparator type rejection, unsupported weak-table options,
 empty-pop and arity errors, cross-policy set behavior, capacity/load bounds,
 stale-entry liveness, destructive self-set operations, and the shared engine's
-insertion links and revision boundaries. Emacs-hosted tests separately cover
-resolver aliases, missing-export diagnostics, and manifest provenance.
+insertion links and revision boundaries. All 18 original local cases run on
+both layouts; nine additional cases cover default construction, layout
+validation, copies, reserve/rehash, sparse collision pruning, and all four
+source/destination layout combinations. Order-independent SRFI assertions
+compare sets or key/value correspondence, including arbitrary `pop!` results.
+The 45-case suite also covers callback and immutable-mutator guards on both
+layouts. Emacs-hosted tests separately cover both layouts through the source
+evaluator, resolver aliases, missing-export diagnostics, and provenance.
 
 Weak or ephemeral storage, thread safety, and hash-distribution performance are
 not claimed as conformance coverage. The portable provider rejects those
@@ -107,8 +132,12 @@ stable order is tested only as an internal engine contract for the future SRFI
 250 facade.
 
 Expected lookup, insertion, update, and deletion cost is amortized constant time
-when the supplied hash function distributes keys satisfactorily. Whole-table
-operations traverse the insertion chain directly. Procedures returning lists
+when the supplied hash function distributes keys satisfactorily. Ordered
+whole-table operations cost O(n); unordered traversal costs O(n + b), where b
+is the bucket count. Immediately after ordinary growth, b is between roughly
+4n/3 and 8n/3. Explicit over-reservation and heavy deletion can leave a much
+sparser table; deletion retains capacity and does not implicitly rehash.
+Procedures returning lists
 allocate their required result lists; callback-only traversals do not first
 allocate an entry snapshot or per-callback argument lists.
 
@@ -118,6 +147,43 @@ that many associations at the same load, rather than reserving two buckets per
 requested association. Growth allocates only the replacement bucket vector and
 relinks the existing entries.
 
+## Storage Cost and Layout Tradeoff
+
+For n associations and b buckets, unordered storage retains `5n + b + 14`
+logical payload fields; ordered storage retains `7n + b + 14`. The fixed 14
+fields comprise the nine-field table and five-field policy. Both layouts have
+`n + 3` storage objects: n entry records, one table, one policy, and one bucket
+vector. These counts exclude shared comparator objects, keys, values, cached
+hash bignums, and host record/header/alignment costs. Resize temporarily retains
+the old and new bucket vectors but does not duplicate entries.
+
+Thus unordered storage saves two words per association and adds one fixed
+table tag word relative to the former ordered-only engine. On a 64-bit host
+that is about 16 bytes per entry, or 0.8 MB at 50,000 entries. The local Gambit
+record inspection reports six structure slots for an unordered entry versus
+eight for an ordered entry, including each record's type slot. Physical bytes
+still depend on the host's headers and allocator; logical field counts are
+not a portable heap-byte measurement.
+
+Same-machine, three-run Guile medians at 50,000 integer associations compare
+the former engine with the split's default unordered layout:
+
+| Workload | Former engine | Unordered layout |
+| --- | ---: | ---: |
+| Growing insertion, 50,000 entries | 0.461s | 0.544s |
+| Pre-sized insertion, 50,000 entries | 0.396s | 0.358s |
+| Successful lookup, 500,000 calls | 1.714s | 1.871s |
+| Missing lookup, 500,000 calls | 1.440s | 1.552s |
+| Callback traversal, 500,000 visits | 0.548s | 0.801s |
+
+The split trades some dispatch and bucket-scanning time for smaller entries;
+it is not a general speed improvement. The ordered layout traversed the same
+500,000 entries in 0.604s. After deleting 49,900 entries without shrinking the
+131,072 buckets, ten traversals cost 0.205s unordered versus 0.0012s ordered.
+Applications dominated by sparse scans should choose ordered storage when its
+public facade is available, or rebuild a smaller unordered table explicitly.
+These timings are evidence from one host and workload, not API guarantees.
+
 Arbitrary user hash procedures can deliberately return the same value for every
 key, so no generic provider can promise constant time for that case without
 changing its equality contract. Such a table degrades to linear lookup and
@@ -126,7 +192,10 @@ comparator to cover correctness through that path; hash-flood resistance is not
 claimed for attacker-selected user hash procedures.
 
 `tools/benchmark-hash-table.scm` reports raw same-host jiffy samples for growing
-and pre-sized insertion, successful and missing lookup, callback traversal, and
-constant-hash scaling. Run it through `tools/run-portable-tests.sh` with
+and pre-sized insertion, successful and missing lookup, callback traversal,
+updates, deletion, sparse scans, logical storage shape, and constant-hash
+scaling. It defaults to unordered storage; passing `--ordered` directly to the
+Scheme program repeats the workloads with ordered storage. Run it through
+`tools/run-portable-tests.sh` with
 `CONSENT_PORTABLE_PROGRAM` set to that file. Compare three-run medians from the
 same machine and host; the benchmark is intentionally not a correctness gate.

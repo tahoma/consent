@@ -5,10 +5,16 @@
 (import (scheme base)
         (scheme process-context)
         (stdlib comparator)
-        (except (stdlib hash-table) string-hash string-ci-hash)
+        (rename (except (stdlib hash-table) string-hash string-ci-hash)
+                (make-hash-table make-public-hash-table))
         (only (stdlib hash-table implementation)
+              make-hash-table-storage
+              hash-table-storage-policy
+              hash-table-storage-layout
               hash-table-entry-set-value!
               hash-table-storage-entries
+              hash-table-storage-ref-entry
+              hash-table-storage-reserve!
               hash-table-storage-capacity
               hash-table-storage-mutation-version
               hash-table-storage-structural-version
@@ -24,6 +30,30 @@
   (guard (condition (else #t))
     (thunk)
     #f))
+
+;; Each semantic case selects one concrete engine layout dynamically.
+(define current-layout (make-parameter 'unordered))
+
+(define (make-hash-table comparator . options)
+  "Construct a table under the conformance case's selected layout."
+  (let ((table (apply make-public-hash-table comparator options)))
+    (if (eq? (current-layout) 'unordered)
+        table
+        (make-hash-table-storage
+         (hash-table-storage-policy table)
+         (hash-table-storage-capacity table) #t (current-layout)))))
+
+;; Run the same semantic assertions against each concrete storage layout.
+(define-syntax layout-case
+  (syntax-rules ()
+    ((_ name tags body ...)
+     (begin
+       (testing-registry-case
+        (list name 'unordered) tags
+        (parameterize ((current-layout 'unordered)) body ...))
+       (testing-registry-case
+        (list name 'insertion-ordered) tags
+        (parameterize ((current-layout 'insertion-ordered)) body ...))))))
 
 (define (every? predicate values)
   "Return whether PREDICATE accepts every member of VALUES."
@@ -69,7 +99,27 @@
            (else
             (insert (cons (car tail) prefix) (cdr tail))))))))
 
-(testing-registry-case
+(define (symbol-set symbols)
+  "Return SYMBOLS in lexical order for order-independent assertions."
+  (let loop ((rest symbols) (result '()))
+    (if (null? rest)
+        result
+        (let insert ((tail result) (prefix '()))
+          (if (or (null? tail)
+                  (string<? (symbol->string (car rest))
+                            (symbol->string (car tail))))
+              (loop (cdr rest)
+                    (append (reverse prefix) (cons (car rest) tail)))
+              (insert (cdr tail) (cons (car tail) prefix)))))))
+
+(define (make-layout-table comparator layout . capacity)
+  "Construct internal LAYOUT storage with a public comparator policy."
+  (let ((table (make-hash-table comparator)))
+    (make-hash-table-storage
+     (hash-table-storage-policy table)
+     (if (null? capacity) 0 (car capacity)) #t layout)))
+
+(layout-case
  'hash-table/construction-and-access '(portable stdlib conformance)
  (test-equal
   'hash-table/construction-and-access
@@ -87,7 +137,7 @@
                           (lambda (value) (* 10 (string-length
                                                 (symbol->string value)))))))))
 
-(testing-registry-case
+(layout-case
  'hash-table/constructors '(portable stdlib conformance)
  (test-equal
   'hash-table/constructors
@@ -107,11 +157,11 @@
     (list (sorted (hash-table-values unfolded))
           (map (lambda (key) (hash-table-ref from-alist key))
                '(a b c))
-          (hash-table-keys literal)
+          (symbol-set (hash-table-keys literal))
           (not (hash-table-mutable? literal))
           (raises? (lambda () (hash-table-set! literal 'c 3)))))))
 
-(testing-registry-case
+(layout-case
  'hash-table/collisions-and-growth '(portable stdlib conformance stress)
  (test-equal
  'hash-table/collisions-and-growth
@@ -137,11 +187,11 @@
             (not (hash-table-contains? table 'key-0))
             (not (hash-table-contains? table 'key-199)))))))
 
-(testing-registry-case
+(layout-case
  'hash-table/mutation-operations '(portable stdlib conformance)
  (test-equal
   'hash-table/mutation-operations
-  '(1 20 8 (d 7) 2 0)
+  '(1 20 8 #t #t 2 0)
   (let ((table (make-hash-table symbol-comparator)))
     (hash-table-set! table 'a 1 'b 2 'c 3)
     (let ((deleted (hash-table-delete! table 'a 'missing)))
@@ -149,20 +199,25 @@
       (hash-table-update! table 'd (lambda (value) (+ value 1))
                           (lambda () 6))
       (hash-table-update!/default table 'c (lambda (value) (+ value 5)) 5)
-      (let ((popped
+      (let* ((b-value (hash-table-ref table 'b))
+            (c-value (hash-table-ref table 'c))
+            (before (hash-table-copy table))
+            (popped
              (call-with-values (lambda () (hash-table-pop! table)) list)))
-        (let ((b-value (hash-table-ref table 'b))
-              (c-value (hash-table-ref table 'c))
-              (remaining (hash-table-size table)))
+        (let ((remaining (hash-table-size table))
+              (valid? (= (hash-table-ref before (car popped))
+                         (cadr popped)))
+              (removed? (not (hash-table-contains? table (car popped)))))
           (hash-table-clear! table)
           (list deleted
                 b-value
                 c-value
-                popped
+                valid?
+                removed?
                 remaining
                 (hash-table-size table))))))))
 
-(testing-registry-case
+(layout-case
  'hash-table/whole-table-operations '(portable stdlib conformance)
  (test-equal
   'hash-table/whole-table-operations
@@ -178,12 +233,13 @@
      (hash-table-fold
       (lambda (key value total) (+ total (* 10 value))) 0 table)
      (length (hash-table-map->list cons table))
-     (hash-table-values
+     (sorted (hash-table-values
       (hash-table-map (lambda (value) (* value 10))
-                      symbol-comparator table))
-     (hash-table->alist table)))))
+                      symbol-comparator table)))
+     (let ((alist (hash-table->alist table)))
+       (map (lambda (key) (assq key alist)) '(a b c)))))))
 
-(testing-registry-case
+(layout-case
  'hash-table/entries-and-fresh-results '(portable stdlib conformance)
  (test-equal
   'hash-table/entries-and-fresh-results
@@ -209,7 +265,7 @@
              (and (not (eq? keys next-keys))
                   (not (eq? values next-values))))))))))))
 
-(testing-registry-case
+(layout-case
  'hash-table/traversal-and-prune '(portable stdlib conformance)
  (test-equal
   'hash-table/traversal-and-prune
@@ -229,7 +285,7 @@
     (hash-table-prune! (lambda (key value) (odd? value)) table)
     (list for-each-total walk-total (hash-table-keys table)))))
 
-(testing-registry-case
+(layout-case
  'hash-table/copy-and-map '(portable stdlib conformance)
  (test-equal
   'hash-table/copy-and-map
@@ -244,9 +300,9 @@
             (hash-table-mutable? mutable)
             (hash-table-size immutable)
             (hash-table-size empty)
-            (hash-table-values mutable))))))
+            (sorted (hash-table-values mutable)))))))
 
-(testing-registry-case
+(layout-case
  'hash-table/set-operations '(portable stdlib conformance)
  (test-equal
   'hash-table/set-operations
@@ -263,12 +319,12 @@
       (hash-table-intersection! intersection right)
       (hash-table-difference! difference right)
       (hash-table-xor! xor right)
-      (list (hash-table-keys union)
-            (hash-table-keys intersection)
-            (hash-table-keys difference)
-            (hash-table-keys xor))))))
+      (list (symbol-set (hash-table-keys union))
+            (symbol-set (hash-table-keys intersection))
+            (symbol-set (hash-table-keys difference))
+            (symbol-set (hash-table-keys xor)))))))
 
-(testing-registry-case
+(layout-case
  'hash-table/comparator-contracts '(portable stdlib conformance error)
  (test-equal
   'hash-table/comparator-contracts
@@ -286,7 +342,7 @@
      (raises? (lambda ()
                 (make-hash-table (lambda (left right) #f))))))))
 
-(testing-registry-case
+(layout-case
  'hash-table/error-contracts '(portable stdlib conformance error)
  (test-equal
   'hash-table/error-contracts
@@ -306,7 +362,7 @@
                         'extra)))
      (raises? (lambda () (make-hash-table unhashable)))))))
 
-(testing-registry-case
+(layout-case
  'hash-table/different-key-comparators '(portable stdlib conformance)
  (test-equal
   'hash-table/different-key-comparators
@@ -325,7 +381,7 @@
             (hash-table-size intersection)
             (hash-table-size difference))))))
 
-(testing-registry-case
+(layout-case
  'hash-table/deprecated-hashes-and-reflection
  '(portable stdlib conformance deprecated)
  (test-equal
@@ -340,7 +396,7 @@
      (= (hash-by-identity table) (hash-by-identity table 97))
      (raises? (lambda () (hash 'value 97 193)))))))
 
-(testing-registry-case
+(layout-case
  'hash-table/callback-mutation-guards '(portable stdlib conformance error)
  (test-equal
   'hash-table/callback-mutation-guards
@@ -418,14 +474,17 @@
         source)
        (= 2 (hash-table-size other)))))))
 
-(testing-registry-case
+(layout-case
  'hash-table/immutable-mutator-guards '(portable stdlib conformance error)
  (test-equal
   'hash-table/immutable-mutator-guards
   '(#t #t #t #t #t #t #t #t #t #t #t #t #t #t)
   (let ((rejects?
          (lambda (mutator)
-           (let ((table (hash-table symbol-comparator 'a 1))
+           (let ((table (hash-table-copy
+                         (let ((source (make-hash-table symbol-comparator)))
+                           (hash-table-set! source 'a 1)
+                           source)))
                  (other (make-hash-table symbol-comparator)))
              (hash-table-set! other 'b 2)
              (raises? (lambda () (mutator table other)))))))
@@ -458,13 +517,13 @@
       (lambda (table other) (hash-table-difference! table other)))
      (rejects? (lambda (table other) (hash-table-xor! table other)))))))
 
-(testing-registry-case
+(layout-case
  'hash-table/shared-engine-order-and-revisions
  '(portable stdlib internal invariant)
  (test-equal
   'hash-table/shared-engine-order-and-revisions
   '((a b c) #t #t #t (a c b))
-  (let ((table (make-hash-table symbol-comparator)))
+  (let ((table (make-layout-table symbol-comparator 'insertion-ordered)))
     (let ((mutation0 (hash-table-storage-mutation-version table))
           (structural0 (hash-table-storage-structural-version table)))
       (hash-table-set! table 'a 1 'b 2 'c 3)
@@ -486,7 +545,7 @@
            linked?
            (hash-table-keys table))))))))
 
-(testing-registry-case
+(layout-case
  'hash-table/shared-engine-capacity-and-liveness
  '(portable stdlib internal invariant)
  (test-equal
@@ -513,7 +572,7 @@
         (lambda ()
           (hash-table-entry-set-value! cleared-entry 'changed))))))))
 
-(testing-registry-case
+(layout-case
  'hash-table/direct-self-set-operations
  '(portable stdlib internal invariant)
  (test-equal
@@ -528,8 +587,125 @@
     (hash-table-intersection! intersection intersection)
     (hash-table-difference! difference difference)
     (hash-table-xor! xor xor)
-    (list (hash-table-keys intersection)
+    (list (symbol-set (hash-table-keys intersection))
           (hash-table-size difference)
           (hash-table-size xor)))))
+
+(testing-registry-case
+ 'hash-table/default-layout-and-validation '(portable stdlib internal)
+ (test-equal
+  'hash-table/default-layout-and-validation
+  '(unordered unordered unordered unordered #t #t #t)
+  (let* ((table (make-public-hash-table integer-comparator))
+         (policy (hash-table-storage-policy table)))
+    (list
+     (hash-table-storage-layout table)
+     (hash-table-storage-layout (hash-table integer-comparator 1 1))
+     (hash-table-storage-layout
+      (alist->hash-table '((1 . 1)) integer-comparator))
+     (hash-table-storage-layout
+      (hash-table-unfold (lambda (n) (= n 1))
+                         (lambda (n) (values n n))
+                         (lambda (n) (+ n 1)) 0 integer-comparator))
+     (raises? (lambda () (make-hash-table-storage policy 0 #t 'unknown)))
+     (raises?
+      (lambda () (make-hash-table-storage policy 0 #t 'unordered 'extra)))
+     (not (hash-table-storage-ref-entry table 0))))))
+
+(layout-case
+ 'hash-table/layout-copy-reserve-and-order '(portable stdlib internal)
+ (test-equal
+  'hash-table/layout-copy-reserve-and-order
+  '(#t #t #t #t #t #t #t)
+  (let ((table (make-hash-table integer-comparator)))
+    ;; Use a scrambled insertion order so bucket order cannot accidentally
+    ;; satisfy ordered assertions.  Reserve rehashes without inserting.
+    (for-each (lambda (key) (hash-table-set! table key (* key 10)))
+              '(7 2 9 1 8 3 6 0 5 4))
+    (let ((saved (hash-table-storage-ref-entry table 7))
+          (revision (hash-table-storage-structural-version table)))
+      (hash-table-storage-reserve! table 1000)
+      (let ((copy (hash-table-copy table #t))
+            (immutable (hash-table-copy table))
+            (empty (hash-table-empty-copy table)))
+        (list
+         (every? (lambda (object)
+                   (eq? (current-layout)
+                        (hash-table-storage-layout object)))
+                 (list copy immutable empty))
+         (eq? saved (hash-table-storage-ref-entry table 7))
+         (= revision (hash-table-storage-structural-version table))
+         (equal? (sorted (hash-table-values copy))
+                 '(0 10 20 30 40 50 60 70 80 90))
+         (or (eq? (current-layout) 'unordered)
+             (equal? (hash-table-keys copy) '(7 2 9 1 8 3 6 0 5 4)))
+         (not (eq? saved (hash-table-storage-ref-entry copy 7)))
+         (raises?
+          (lambda ()
+            (hash-table-entry-set-value!
+             (hash-table-storage-ref-entry immutable 7) 'changed)))))))))
+
+(layout-case
+ 'hash-table/collision-prune-sparse-clear '(portable stdlib internal stress)
+ (test-equal
+  'hash-table/collision-prune-sparse-clear
+  '(#t #t 20 2 #t 0 #t)
+  (let* ((comparator (make-comparator integer? = < (lambda (key) 0)))
+         (table (make-hash-table comparator 10000)))
+    (do ((key 0 (+ key 1))) ((= key 40))
+      (hash-table-set! table key key))
+    (let* ((stale (hash-table-storage-ref-entry table 0))
+           (copy (hash-table-copy table #t)))
+      ;; Save each bucket successor before deleting head/middle/tail entries.
+      (hash-table-prune! (lambda (key value) (even? key)) table)
+      (let ((keys (sorted (hash-table-keys table))))
+        (hash-table-clear! copy)
+        (hash-table-clear! copy)
+        (list
+         (every? odd? keys)
+         (raises? (lambda () (hash-table-entry-set-value! stale 99)))
+         (hash-table-size table)
+         (hash-table-ref table 2 (lambda () 2))
+         (= 39 (hash-table-ref table 39))
+         (hash-table-size copy)
+         (eq? (hash-table-storage-layout copy) (current-layout))))))))
+
+(for-each
+ (lambda (left-layout)
+   (for-each
+    (lambda (right-layout)
+      (testing-registry-case
+       (list 'hash-table/mixed-layout-sets left-layout right-layout)
+       '(portable stdlib internal)
+       (test-equal
+        'hash-table/mixed-layout-sets
+        '((a b c) (b) (a) (a c) #t #t #t)
+        (let ((left (make-layout-table symbol-comparator left-layout))
+              (right (make-layout-table symbol-comparator right-layout))
+              (same (make-layout-table symbol-comparator right-layout)))
+          (hash-table-set! left 'b 2 'a 1)
+          (hash-table-set! right 'c 3 'b 20)
+          (hash-table-set! same 'a 1 'b 2)
+          (let ((union (hash-table-copy left #t))
+                (intersection (hash-table-copy left #t))
+                (difference (hash-table-copy left #t))
+                (xor (hash-table-copy left #t)))
+            (hash-table-union! union right)
+            (hash-table-intersection! intersection right)
+            (hash-table-difference! difference right)
+            (hash-table-xor! xor right)
+            (list
+             (symbol-set (hash-table-keys union))
+             (symbol-set (hash-table-keys intersection))
+             (symbol-set (hash-table-keys difference))
+             (symbol-set (hash-table-keys xor))
+             (hash-table=? integer-comparator left same)
+             (every? (lambda (object)
+                       (eq? (hash-table-storage-layout object) left-layout))
+                     (list union intersection difference xor))
+             (or (eq? left-layout 'unordered)
+                 (equal? (hash-table-keys union) '(b a c)))))))))
+    '(unordered insertion-ordered)))
+ '(unordered insertion-ordered))
 
 (testing-runner-main "SRFI 125 hash tables" (command-line))

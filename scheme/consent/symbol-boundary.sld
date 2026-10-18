@@ -20,6 +20,41 @@
                   (symbol->string host-symbol->string))
           (consent identity-map)
           (consent symbol))
+  (cond-expand
+   (chibi
+    (begin
+      ;; Chibi formats immediate host symbols through an output-string port.
+      ;; Repeated bootstrap comparisons need only a private, read-only name.
+      ;; Bound retained symbols and name lengths; never expose cached strings.
+      (define comparison-name-cache
+        (make-vector 32 #f))
+      (define comparison-name-next 0)
+
+      (define (comparison-name-ref value index)
+        "Find VALUE's cached name without allocating a lookup closure."
+        (if (= index (vector-length comparison-name-cache))
+            #f
+            (let ((entry (vector-ref comparison-name-cache index)))
+              (if (and entry (host-eq? value (car entry)))
+                  (cdr entry)
+                  (comparison-name-ref value (+ index 1))))))
+
+      (define (host-symbol-comparison-name value)
+        "Return a bounded cached Chibi host-symbol name for comparison."
+        (or (comparison-name-ref value 0)
+            (let ((name (host-symbol->string value)))
+              (if (<= (string-length name) 64)
+                  (begin
+                    (vector-set! comparison-name-cache comparison-name-next
+                                 (cons value name))
+                    (set! comparison-name-next
+                          (modulo (+ comparison-name-next 1)
+                                  (vector-length comparison-name-cache)))))
+              name)))))
+   (else
+    (begin
+      (define host-symbol-comparison-name
+        host-symbol->string))))
   (begin
     ;; Private evaluator metadata is still represented by host symbols while a
     ;; borrowed Scheme host bootstraps the runtime. This library is the only
@@ -54,16 +89,16 @@
          (left (type any) (description "First value to compare."))
          (right (type any) (description "Second value to compare.")))
         (returns (type boolean) (description "Whether values are identical."))
-        (effects allocation))
+        (effects state-read state-write allocation))
       (or (host-eq? left right)
           (cond
            ((and (consent-symbol? left) (consent-symbol? right))
             (consent-symbol-equivalent? left right))
            ((and (consent-symbol? left) (host-symbol? right))
             (string=? (consent-symbol-name left)
-                      (host-symbol->string right)))
+                      (host-symbol-comparison-name right)))
            ((and (host-symbol? left) (consent-symbol? right))
-            (string=? (host-symbol->string left)
+            (string=? (host-symbol-comparison-name left)
                       (consent-symbol-name right)))
            (else #f))))
 
@@ -73,7 +108,7 @@
          (left (type any) (description "First value to compare."))
          (right (type any) (description "Second value to compare.")))
         (returns (type boolean) (description "Whether values are equivalent."))
-        (effects allocation))
+        (effects state-read state-write allocation))
       (if (or (consent-host-symbol? left)
               (consent-host-symbol? right))
           (and (consent-host-symbol? left)
@@ -269,7 +304,7 @@
          (left (type any) (description "First value to compare."))
          (right (type any) (description "Second value to compare.")))
         (returns (type boolean) (description "Whether values are equal."))
-        (effects allocation))
+        (effects state-read state-write allocation))
       (let ((short-result (unary-pair-equal? left right)))
         (if (host-eq?
              short-result symbol-boundary-comparison-unknown)
@@ -283,7 +318,7 @@
          (values (type list) (description "List to search.")))
         (returns (type (or list boolean))
          (description "Matching list tail, or #f."))
-        (effects allocation))
+        (effects state-read state-write allocation))
       (let loop ((rest values))
         (cond
          ((null? rest) #f)
@@ -297,7 +332,7 @@
          (alist (type list) (description "Association list to search.")))
         (returns (type (or pair boolean))
          (description "Matching association, or #f."))
-        (effects allocation))
+        (effects state-read state-write allocation))
       (let loop ((rest alist))
         (cond
          ((null? rest) #f)
@@ -313,7 +348,7 @@
           (description "Optional singleton equality predicate list.")))
         (returns (type (or list boolean))
          (description "Matching list tail, or #f."))
-        (effects allocation procedure-call))
+        (effects state-read state-write allocation procedure-call))
       (let ((same? (if (null? maybe-equal?)
                        consent-host-symbol-equal?
                        (car maybe-equal?))))
@@ -332,7 +367,7 @@
           (description "Optional singleton equality predicate list.")))
         (returns (type (or pair boolean))
          (description "Matching association, or #f."))
-        (effects allocation procedure-call))
+        (effects state-read state-write allocation procedure-call))
       (let ((same? (if (null? maybe-equal?)
                        consent-host-symbol-equal?
                        (car maybe-equal?))))

@@ -51,7 +51,9 @@
                           (modulo (+ comparison-name-next 1)
                                   (vector-length comparison-name-cache)))))
               name)))))
-   (else
+   ;; Guile 3.0.9 drops library-level `else' clauses. Use the explicit
+   ;; complement so its source loader and compiler retain the fallback.
+   ((not chibi)
     (begin
       (define host-symbol-comparison-name
         host-symbol->string))))

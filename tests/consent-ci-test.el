@@ -1087,30 +1087,24 @@ reflection 6.800\n"
                "racket-build-v1-"))
       (should-not (string-match-p (regexp-quote forbidden) workflow)))))
 
-(ert-deftest consent-ci-test-gauche-hosts-container-avoids-docker-hub ()
-  "Pull the Gauche container base image from ECR Public, not Docker Hub."
+(ert-deftest consent-ci-test-gauche-jobs-avoid-container-registry-setup ()
+  "Run both Gauche matrices on native runners without pre-checkout pulls."
   (let ((workflow (consent-ci-test--repo-file-string
                    ".github/workflows/test.yml")))
-    (should (string-match-p
-             "test-portable-gauche-hosts:"
-             workflow))
-    (should (string-match-p
-             "max-parallel: 1"
-             workflow))
-    (should (string-match-p
-             "test-portable-gauche-shards:"
-             workflow))
-    (should (string-match-p
-             "max-parallel: 4"
-             workflow))
-    (should (string-match-p
-             "container: public\\.ecr\\.aws/ubuntu/ubuntu:26\\.04"
-             workflow))
-    (should (string-match-p
-             "test-portable-gauche-hosts"
-             workflow))
-    ;; The Docker Hub form (registry-1.docker.io) must no longer be requested.
-    (should-not (string-match-p "container: ubuntu:26\\.04" workflow))))
+    (dolist (job '("test-portable-gauche-shards"
+                   "test-portable-gauche-hosts"))
+      (should (string-match (concat "^  " job ":\n") workflow))
+      (let* ((start (match-end 0))
+             (end (or (string-match "^  [[:alnum:]_-]+:" workflow start)
+                      (length workflow)))
+             (body (substring workflow start end)))
+        (should (string-match-p "^    runs-on: ubuntu-26\\.04$" body))
+        (should-not (string-match-p "^    container:" body))
+        (should-not (string-match-p "Install checkout tools" body))
+        (should (consent-ci-test--ordered-substrings-p
+                 '("uses: actions/checkout@v6"
+                   "uses: ./.github/actions/apt-install")
+                 body))))))
 
 (ert-deftest consent-ci-test-portable-outliers-use-first-class-plan-shards ()
   "Run long portable hosts as independently scheduled semantic plan shards."
@@ -1270,7 +1264,7 @@ reflection 6.800\n"
              (mapcar #'ert-test-name (ert-select-tests selector t)))
            partition-selectors))
          (flattened (apply #'append parts)))
-    (should (= (length aggregate) 251))
+    (should (= (length aggregate) 257))
     (should (= (length flattened)
                (length (delete-dups (copy-sequence flattened)))))
     (should (equal (sort aggregate #'string-lessp)

@@ -6,6 +6,15 @@
         (scheme process-context)
         (consent reader)
         (consent symbol)
+        (only (consent symbol-boundary)
+              consent-host-symbol-name
+              consent-host-symbol-eq?
+              consent-host-symbol-eqv?
+              consent-host-symbol-equal?
+              consent-host-symbol-memq
+              consent-host-symbol-assq
+              consent-host-symbol-member
+              consent-host-symbol-assoc)
         (only (consent library)
               consent-native-argument-value
               consent-runtime-datum->native-datum)
@@ -52,6 +61,75 @@
        (consent-symbol? 'portable)
        (not (consent-symbol? 'portable))))
   (test-equal 'immutable-symbol-name "portable" (consent-symbol-name symbol))))
+
+(testing-registry-case
+ 'bootstrap-symbol-comparison-reuse '(portable runtime symbol boundary)
+(let* ((table (consent-make-symbol-table))
+       (owned (consent-intern-symbol table "lambda"))
+       (tail (list 'lambda 'other))
+       (entry (cons 'lambda 'value))
+       (alist (list (cons 'other #f) entry)))
+  (test-assert
+   'mixed-symbol-comparison-reuses-names
+   (let loop ((remaining 256))
+     (or (= remaining 0)
+         (and (consent-host-symbol-eq? owned 'lambda)
+              (consent-host-symbol-eq? 'lambda owned)
+              (consent-host-symbol-eqv? owned 'lambda)
+              (not (consent-host-symbol-eq? owned 'other))
+              (not (consent-host-symbol-eq? owned "lambda"))
+              (loop (- remaining 1))))))
+  (test-assert 'mixed-symbol-compound-comparison
+               (consent-host-symbol-equal?
+                (vector owned (list owned))
+                (vector 'lambda '(lambda))))
+  (test-assert 'mixed-symbol-memq-keeps-tail
+               (eq? tail (consent-host-symbol-memq owned tail)))
+  (test-assert 'mixed-symbol-member-keeps-tail
+               (eq? tail (consent-host-symbol-member owned tail)))
+  (test-assert 'mixed-symbol-assq-keeps-entry
+               (eq? entry (consent-host-symbol-assq owned alist)))
+  (test-assert 'mixed-symbol-assoc-keeps-entry
+               (eq? entry (consent-host-symbol-assoc owned alist)))
+  (let ((exposed (consent-host-symbol-name owned)))
+    (string-set! exposed 0 #\L)
+    (test-assert 'mixed-symbol-name-copy-does-not-poison-comparison
+                 (consent-host-symbol-eq? owned 'lambda)))))
+
+(testing-registry-case
+ 'bootstrap-symbol-comparison-churn '(portable runtime symbol boundary)
+(let ((table (consent-make-symbol-table)))
+  (test-assert
+   'mixed-symbol-comparison-survives-cache-replacement
+   (let loop ((index 0))
+     (or (= index 128)
+         (let* ((name (numbered-symbol-name index))
+                (host (string->symbol name))
+                (owned (consent-intern-symbol table name)))
+           (and (consent-host-symbol-eq? owned host)
+                (consent-host-symbol-eq? host owned)
+                (not (consent-host-symbol-eq? owned 'different))
+                (loop (+ index 1)))))))
+  (test-assert 'mixed-symbol-comparison-after-replacement
+               (consent-host-symbol-eq?
+                (consent-intern-symbol table "owned-symbol-0")
+                'owned-symbol-0))))
+
+(testing-registry-case
+ 'bootstrap-symbol-comparison-long-names '(portable runtime symbol boundary)
+(let ((table (consent-make-symbol-table)))
+  (for-each
+   (lambda (size)
+     (let* ((name (make-string size #\x))
+            (host (string->symbol name))
+            (owned (consent-intern-symbol table name)))
+       (test-assert (list 'long-symbol-owned-host size)
+                    (consent-host-symbol-eq? owned host))
+       (test-assert (list 'long-symbol-host-owned size)
+                    (consent-host-symbol-eq? host owned))
+       (test-equal (list 'long-symbol-name-keeps-content size)
+                   name (consent-host-symbol-name owned))))
+   '(63 64 65 1024))))
 
 (testing-registry-case
  'repeated-interning '(portable runtime symbol)

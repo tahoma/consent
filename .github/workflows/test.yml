@@ -1253,9 +1253,10 @@ jobs:
       portable R7RS / Gauche / ${{ matrix.case.label }} / syntax ${{
       matrix.case.source_metadata }} / docstrings ${{
       matrix.case.docstring_retention }}
-    runs-on: ubuntu-latest
+    # Use the packaged host directly; job containers can fail on registry
+    # quotas before checkout, where workflow retry steps cannot recover.
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
-    container: public.ecr.aws/ubuntu/ubuntu:26.04
     env:
       DEBIAN_FRONTEND: noninteractive
       CONSENT_TEST_SOURCE_METADATA: ${{ matrix.case.source_metadata }}
@@ -1321,12 +1322,6 @@ jobs:
           infrastructure","source_metadata":"on","docstring_retention":"full",
           "aggregate":false}]') }}
     steps:
-      - name: Install checkout tools
-        shell: bash
-        run: |
-          apt-get update -o Acquire::Retries=3
-          apt-get install -y --no-install-recommends ca-certificates git
-
       - name: Check out repository
         uses: actions/checkout@v6
 
@@ -1396,12 +1391,9 @@ jobs:
     name: >-2
       portable R7RS / ${{ matrix.host.host_name }} / syntax ${{
       matrix.source_metadata }} / docstrings ${{ matrix.docstring_retention }}
-    runs-on: ubuntu-latest
+    # Match the semantic shards without a pre-checkout registry dependency.
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
-    # Gauche is packaged in Ubuntu 26.04 but not the bare ubuntu-latest runner's
-    # Ubuntu 24.04 apt universe. Keep the container scoped to Gauche shards and
-    # run one containerized shard at a time to avoid registry pull throttling.
-    container: public.ecr.aws/ubuntu/ubuntu:26.04
     env:
       DEBIAN_FRONTEND: noninteractive
       CONSENT_TEST_SOURCE_METADATA: ${{ matrix.source_metadata }}
@@ -1449,24 +1441,6 @@ jobs:
             group_set: single
 
     steps:
-      - name: Install checkout tools
-        shell: bash
-        run: |
-          run() { timeout 180 "$@"; }
-          ok=0
-          for attempt in 1 2 3 4; do
-            if run apt-get update -o Acquire::Retries=3 \
-               && run apt-get install -y --no-install-recommends -o \
-                 Acquire::Retries=3 ca-certificates git tar zstd; then
-              ok=1
-              break
-            fi
-            echo "::warning::apt attempt ${attempt} failed; retrying" >&2
-            sleep $((attempt * 10))
-          done
-          [ "${ok}" -eq 1 ] || { echo "::error::apt failed after retries" \
-            >&2; exit 1; }
-
       - name: Check out repository
         uses: actions/checkout@v6
 
@@ -1867,10 +1841,8 @@ jobs:
     # any result divergence. The per-push lane runs the canonical on/full combo;
     # the scheduled / workflow_dispatch lane expands to the full 2x3 cross,
     # since each core's own shards already carry the metadata/docstring axis.
-    # Guile is
-    # the parity host here because it ships in the bare ubuntu-latest runner's
-    # apt universe; Gauche is only packaged in the Ubuntu 26.04 container used
-    # by the Gauche-specific portable-host shards.
+    # Guile remains the parity host on ubuntu-latest. The Gauche-specific
+    # portable-host jobs select Ubuntu 26.04 explicitly for its apt package.
     env:
       CONSENT_PARITY_HOST: guile
       CONSENT_TEST_SOURCE_METADATA: ${{ matrix.source_metadata }}
